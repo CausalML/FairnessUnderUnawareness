@@ -1,0 +1,302 @@
+---
+title: "data_analysis_fat"
+author: "Xiaojie Mao"
+date: "6/9/2019"
+output: html_document
+---
+
+
+```{r}
+library(tidyverse)
+library(lemon)
+library(latex2exp)
+source("data_cleaning_helper.R")
+source("fat_analysis_helper.R")
+```
+
+```{r cache = T}
+hmda = read_csv("hmda_census_combined.csv")
+
+hmda = hmda %>% 
+  select(one_of(c("state_code", "COUNTY", "census_tract_number", "applicant_income_000s", "Hispanic", "White", "Black", "AIAN", "API", "outcome", "applicant_ethnicity_name", "applicant_race_name_1", "applicant_race_name_2")))
+
+hmda = hmda %>% make_race_fat() %>% remove_obs(get_obs_race_empty)
+```
+
+```{r cache = T}
+# use a small sample 
+hmda = hmda %>% group_by(outcome, race) %>% sample_frac(0.001)
+hmda = hmda %>% ungroup()
+```
+
+# Group Mean and Demographic Disparity Estimation Bias
+```{r cache = T}
+race_name = c("White", "Black", "AIAN", "API", "Hispanic")
+hmda$race_threshold_50 = est_race_threshold_rule(hmda, 0.5)
+hmda$race_threshold_80 = est_race_threshold_rule(hmda, 0.8)
+hmda$race_threshold_90 = est_race_threshold_rule(hmda, 0.9)
+
+demo_disparity_true = demo_disparity_race(hmda, hmda$race)
+demo_disparity_threshold_50 = demo_disparity_race(hmda, hmda$race_threshold_50)
+demo_disparity_threshold_80 = demo_disparity_race(hmda, hmda$race_threshold_80)
+demo_disparity_threshold_90 = demo_disparity_race(hmda, hmda$race_threshold_90)
+demo_disparity_weighted = demo_disparity_weighted(hmda)
+
+# compile group mean for different methods 
+proportion = data.frame(true = demo_disparity_true$est_prop, threshold_50 = demo_disparity_threshold_50$est_prop, threshold_80 = demo_disparity_threshold_80$est_prop, threshold_90 = demo_disparity_threshold_90$est_prop, weighted = demo_disparity_weighted$prop, race = names(demo_disparity_true$est_prop))
+
+proportion = gather(proportion, key = "Method", value = "average_outcome", one_of("true", "threshold_50", "threshold_80", "threshold_90", "weighted"))
+proportion$Method = factor(proportion$Method, levels = c("true", "threshold_50", "threshold_80", "threshold_90", "weighted"))
+
+proportion_bias = proportion
+for (m in unique(proportion$Method)){
+  proportion_bias[proportion_bias$Method == m, "average_outcome"] = proportion_bias[proportion_bias$Method == m, "average_outcome"] - proportion[(proportion$Method == "true"), "average_outcome"]
+}
+proportion_bias = filter(proportion_bias, (Method != "true"))
+proportion_bias$Method = droplevels(proportion_bias$Method)
+levels(proportion_bias$Method) = c("50% Thresholding", "80% Thresholding", "90% Thresholding", "Weighted")
+
+
+# compile demographic disparity for different methods 
+demo_disparity = data.frame(true = demo_disparity_true$est_disparity, threshold_50 = demo_disparity_threshold_50$est_disparity,threshold_80 = demo_disparity_threshold_80$est_disparity, threshold_90 = demo_disparity_threshold_90$est_disparity, weighted = demo_disparity_weighted$disparity, race_pair = names(demo_disparity_threshold_90$est_disparity))
+
+demo_disparity = gather(demo_disparity, key = "Method", value = "demographic_disparity", one_of("true", "threshold_50", "threshold_80", "threshold_90", "weighted"))
+demo_disparity$Method = factor(demo_disparity$Method, levels = c("true", "threshold_50", "threshold_80", "threshold_90", "weighted"))
+
+demo_disparity_bias = demo_disparity
+for (m in unique(demo_disparity$Method)){
+  demo_disparity_bias[demo_disparity_bias$Method == m, "demographic_disparity"] = demo_disparity_bias[demo_disparity_bias$Method == m, "demographic_disparity"] - demo_disparity[(demo_disparity$Method == "true"), "demographic_disparity"]
+}
+levels(demo_disparity_bias$race_pair) = c("White-AIAN", "White-API", "White-Black", "White-Hispanic")
+demo_disparity_bias = filter(demo_disparity_bias, Method != "true")
+demo_disparity_bias$Method = droplevels(demo_disparity_bias$Method)
+levels(demo_disparity_bias$Method) = c("50% Thresholding", "80% Thresholding", "90% Thresholding", "Weighted")
+```
+
+```{r cache = T}
+####################
+#   Figure 3
+####################
+pp = proportion_bias %>% 
+  filter((race != "AIAN") & (race != "API")) %>% 
+  ggplot(aes(x = race, y = average_outcome, 
+             fill = Method)) + geom_bar(stat = "identity", position=position_dodge(), colour = "black") + theme_classic() +
+  ylab("Acceptance Rate Estimation Bias") + xlab("Race") + 
+  theme(plot.title = element_text(hjust = 0.5)) + ylim(c(-0.12, 0.12)) + 
+  scale_colour_manual(values = c("50% Thresholding"="red", "80% Thresholding"="green", 
+                                 "90% Thresholding"="blue", "Weighted"="Purple"))
+
+pdd = demo_disparity_bias %>% 
+  filter((race_pair != "White-AIAN") & (race_pair != "White-API")) %>% 
+  ggplot(aes(x = race_pair, y = demographic_disparity, 
+             fill = Method)) + geom_bar(stat = "identity", position=position_dodge(), colour = "black") + theme_classic() +
+  ylab("Demographic Disparity Estimation Bias") + xlab("Race Pair") + 
+  theme(plot.title = element_text(hjust = 0.5)) + ylim(c(-0.12, 0.12)) + 
+  scale_colour_manual(values = c("50% Thresholding"="red", "80% Thresholding"="green", 
+                                 "90% Thresholding"="blue", "Weighted"="Purple"))
+
+grid_arrange_shared_legend(pp, pdd, nrow = 1)
+```
+
+# Condition for estimation bias of Thresholded Estimator 
+```{r cache = T}
+cond_white_black_50 = evaluate_threshold_conditions(hmda, 0.5, advantage_group_name = "White", disadvantage_group_name = "Black")
+cond_white_hispanic_50 = evaluate_threshold_conditions(hmda, 0.5, advantage_group_name = "White", disadvantage_group_name = "Hispanic")
+cond_white_black_80 = evaluate_threshold_conditions(hmda, 0.8, advantage_group_name = "White", disadvantage_group_name = "Black")
+cond_white_hispanic_80 = evaluate_threshold_conditions(hmda, 0.8, advantage_group_name = "White", disadvantage_group_name = "Hispanic")
+cond_white_black_90 = evaluate_threshold_conditions(hmda, 0.9, advantage_group_name = "White", disadvantage_group_name = "Black")
+cond_white_hispanic_90 = evaluate_threshold_conditions(hmda, 0.9, advantage_group_name = "White", disadvantage_group_name = "Hispanic")
+
+cond_white_black = data.frame(threshold_50 = cond_white_black_50, threshold_80 = cond_white_black_80, threshold_90 = cond_white_black_90, condition = names(cond_white_black_80))
+
+cond_white_hispanic = data.frame(threshold_50 = cond_white_hispanic_50, threshold_80 = cond_white_hispanic_80, threshold_90 = cond_white_hispanic_90, condition = names(cond_white_black_80))
+
+cond_white_black = gather(cond_white_black, key = Method, value = condition_value, one_of(c("threshold_50", "threshold_80", "threshold_90")))
+cond_white_hispanic = gather(cond_white_hispanic, key = Method, value = condition_value, one_of(c("threshold_50", "threshold_80", "threshold_90")))
+
+conditions = rbind(cond_white_black, cond_white_hispanic)
+conditions$race_pair = rep(c("White-Black", "White-Hispanic"), each = 12)
+
+conditions = conditions %>% 
+  mutate(
+    Condition = case_when(
+      condition == "condition 1" ~ "(i)",
+      condition == "condition 2" ~ "(ii)",
+      condition == "condition 3" ~ "(iii)",
+      condition == "condition 4" ~ "(iv)",
+    )
+  )
+
+conditions$Method = as.factor(conditions$Method)
+levels(conditions$Method) = c("50% Thresholding", "80% Thresholding", "90% Thresholding")
+
+```
+
+```{r cache = T}
+####################
+#   Figure 4
+####################
+
+conditions %>% 
+  filter((race_pair != "White-AIAN") & (race_pair != "White-API")) %>% 
+  ggplot(aes(x = Condition, y = condition_value, fill = Method)) + 
+  geom_bar(stat = "identity", position=position_dodge(), colour = "black") + 
+  theme_classic() + 
+  xlab("Conditions") +
+  facet_wrap(~ race_pair, nrow = 1) + 
+  ylab("Term Value") + 
+  scale_colour_manual(values = c("50% Thresholding"="red", "80% Thresholding"="green", 
+                                 "90% Thresholding"="blue"))
+```
+
+# Relative influence of two estimation bias sources
+```{r cache = T}
+race_pair = rep(c("White-Black", "White-Hispanic", "White-API"), each = 2)
+race = c("White", "Black", "White", "Hispanic", "White", "API")
+other_race = c("Black", "White", "Hispanic", "White", "API", "White")
+
+bias_50 = compute_bias_influence(race_pair, race, other_race, threshold = 0.5)
+bias_80 = compute_bias_influence(race_pair, race, other_race, threshold = 0.8)
+bias_90 = compute_bias_influence(race_pair, race, other_race, threshold = 0.9)
+
+
+temp1 = bias_50 %>% 
+  filter(race_pair == "White-Black", (race == "White") | (race == "Black")) %>% 
+  select(one_of("race_pair","race", "C1", "C2", "C3", "prop_A_u", "prop_hat_A_u"))
+temp2 = bias_80 %>% 
+  filter(race_pair == "White-Black", (race == "White") | (race == "Black")) %>% 
+  select(one_of("race_pair","race", "C1", "C2", "C3", "prop_A_u", "prop_hat_A_u"))
+temp3 = bias_90 %>% 
+  filter(race_pair == "White-Black", (race == "White") | (race == "Black")) %>% 
+  select(one_of("race_pair","race", "C1", "C2", "C3", "prop_A_u", "prop_hat_A_u"))
+White_Black = rbind(temp1, temp2, temp3)
+White_Black$Method = rep(c("50% Thresholding", "80% Thresholding", "90% Thresholding"), each = 2)
+```
+
+```{r cache = T}
+########################
+#       Figure 5
+########################
+pc = White_Black %>% 
+  # gather(key = "value_type", value = "function_Value", one_of(c("C1", "C2"))) %>% 
+  ggplot(aes(x = race, y = C2 - C1, fill = Method)) +
+  geom_bar(stat = "identity", position=position_dodge(), colour = "black") + 
+  theme_classic() + 
+  xlab("Race") + ylab(TeX("$C_2 - C_1$")) + ylim(c(0, 0.85))
+ppaudiff = White_Black %>% 
+  # gather(key = "value_type", value = "function_Value", one_of(c("C1", "C2"))) %>% 
+  ggplot(aes(x = race, y = prop_A_u - prop_hat_A_u, fill = Method)) +
+  geom_bar(stat = "identity", position=position_dodge(), colour = "black") + 
+  theme_classic() + 
+  xlab("Race") + ylab(TeX("$P(A = u) - P(\\hat{A} = u)$")) 
+
+grid_arrange_shared_legend(pc, ppaudiff, nrow = 1, ncol = 2, position = "bottom")
+```
+
+# estimation bias condition for weighted estimator
+Note that this part must use full dataset rather than the 0.1% subsample. 
+
+```{r cache = T}
+hmda = read_csv("hmda_census_combined.csv")
+
+hmda = hmda %>% 
+  select(one_of(c("state_code", "COUNTY", "census_tract_number", "applicant_income_000s", "Hispanic", "White", "Black", "AIAN", "API", "outcome", "applicant_ethnicity_name", "applicant_race_name_1", "applicant_race_name_2")))
+
+hmda = hmda %>% make_race_fat() %>% remove_obs(get_obs_race_empty)
+```
+
+```{r cache = T}
+temp1 = hmda %>% 
+  group_by(state_code, COUNTY, census_tract_number) %>% 
+  summarise(
+    count = n(),
+    White_count = sum(race == "White", na.rm = T),
+    Black_count = sum(race == "Black", na.rm = T),
+    Hispanic_count = sum(race == "Hispanic", na.rm = T),
+    API_count = sum(race == "API", na.rm = T),
+    AIAN_count = sum(race == "AIAN", na.rm = T),
+    White_outcome = mean(outcome[race == "White"]),
+    Black_outcome = mean(outcome[race == "Black"]),
+    Hispanic_outcome = mean(outcome[race == "Hispanic"]),
+    API_outcome = mean(outcome[race == "API"]),
+    AIAN_outcome = mean(outcome[race == "AIAN"])
+  )
+cutoff = 30
+
+# filter the observations whose census tracts have more than 30 borrowers
+temp_wh = hmda %>% 
+  left_join(temp1, by = c("state_code", "COUNTY", "census_tract_number")) %>% 
+  filter((White_count > cutoff) &  (Hispanic_count > cutoff)) %>% 
+  arrange(state_code, COUNTY, census_tract_number)
+temp_wb = hmda %>% 
+  left_join(temp1, by = c("state_code", "COUNTY", "census_tract_number")) %>% 
+  filter((White_count > cutoff) &  (Black_count > cutoff)) %>% 
+  arrange(state_code, COUNTY, census_tract_number)
+temp_wapi = hmda %>% 
+  left_join(temp1, by = c("state_code", "COUNTY", "census_tract_number")) %>% 
+  filter((White_count > cutoff) &  (API_count > cutoff)) %>% 
+  arrange(state_code, COUNTY, census_tract_number)
+
+temp_wh2 = temp_wh %>% 
+  make_covariance_race_outcome(advantage_name = "White", disadvantage_name = "Hispanic")
+temp_wb2 = temp_wb %>% 
+  make_covariance_race_outcome(advantage_name = "White", disadvantage_name = "Black")
+temp_wapi2 = temp_wapi %>% 
+  make_covariance_race_outcome(advantage_name = "White", disadvantage_name = "API")
+
+# compute the proportion of borrowers falling into four different quadrants 
+temp_wh3 = temp_wh2 %>% 
+  mutate(
+    ad_plus_dis_minus = (cov_ad_outcome > 0) & (cov_disad_outcome < 0),
+    ad_plus_dis_plus = (cov_ad_outcome > 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_plus = (cov_ad_outcome < 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_minus = (cov_ad_outcome < 0) & (cov_disad_outcome < 0)
+  )
+temp_wb3 = temp_wb2 %>% 
+  mutate(
+    ad_plus_dis_minus = (cov_ad_outcome > 0) & (cov_disad_outcome < 0),
+    ad_plus_dis_plus = (cov_ad_outcome > 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_plus = (cov_ad_outcome < 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_minus = (cov_ad_outcome < 0) & (cov_disad_outcome < 0)
+  )
+temp_wapi3 = temp_wapi2 %>% 
+  mutate(
+    ad_plus_dis_minus = (cov_ad_outcome > 0) & (cov_disad_outcome < 0),
+    ad_plus_dis_plus = (cov_ad_outcome > 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_plus = (cov_ad_outcome < 0) & (cov_disad_outcome > 0),
+    ad_minus_dis_minus = (cov_ad_outcome < 0) & (cov_disad_outcome < 0)
+  )
+
+wh_label = round(colMeans(temp_wh3[, c("ad_plus_dis_minus", "ad_plus_dis_plus", "ad_minus_dis_plus", "ad_minus_dis_minus")]), digits = 2)
+wb_label = round(colMeans(temp_wb3[, c("ad_plus_dis_minus", "ad_plus_dis_plus", "ad_minus_dis_plus", "ad_minus_dis_minus")]), digits = 2)
+wapi_label = round(colMeans(temp_wapi3[, c("ad_plus_dis_minus", "ad_plus_dis_plus", "ad_minus_dis_plus", "ad_minus_dis_minus")]), digits = 2)
+
+```
+
+```{r cache = T}
+########################
+#       Figure 6
+########################
+p2dht_wh2 = temp_wh2 %>% 
+  ggplot(aes(x = cov_disad_outcome, y = cov_ad_outcome)) +
+  geom_hex(bins = 60) + 
+  viridis::scale_fill_viridis(limits = c(0, 320000)) +
+  xlim(-0.15, 0.1) + ylim(-0.075, 0.16) + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  ylab("Covariance: being white and being accepted") + xlab("Covariance: being Hispanic and being accepted") +
+  annotate("text", x = c(-0.05, 0.075, -0.05, 0.075), y = c(0.12, 0.12, -0.075, -0.075), label = wh_label, color = "red")
+p2dht_wb2 = temp_wb2 %>% 
+  ggplot(aes(x = cov_disad_outcome, y = cov_ad_outcome)) +
+  xlim(-0.15, 0.1) + ylim(-0.075, 0.16) + 
+  geom_hex(bins = 60) + 
+  viridis::scale_fill_viridis(limits = c(0, 320000)) +
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + 
+  xlab("Covariance: being Black and being accepted") + ylab("") + 
+  annotate("text", x = c(-0.05, 0.075, -0.05, 0.075), y = c(0.12, 0.12, -0.075, -0.075), label = wb_label, color = "red")
+grid_arrange_shared_legend(p2dht_wh2, p2dht_wb2, position = "right")
+```
+
+
+
+
+

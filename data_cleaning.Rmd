@@ -1,0 +1,94 @@
+---
+title: "data_cleaning"
+author: "Xiaojie Mao"
+date: "6/9/2019"
+output: html_document
+---
+
+
+# Data downloading
+
+## HMDA dataset 
+We use the HMDA 2011-2012 data following the CFPB's technical report: https://files.consumerfinance.gov/f/201409_cfpb_report_proxy-methodology.pdf
+
+The data can be downloaded from https://www.consumerfinance.gov/data-research/hmda/explore. We query the following observations and variables:
+
+- where: (applicant_ethnicity=1 OR applicant_ethnicity=2) AND (applicant_race_1=1 OR applicant_race_1=2 OR applicant_race_1=3 OR applicant_race_1=4 OR applicant_race_1=5) AND (action_taken=1 OR action_taken=2 OR action_taken=3) AND (as_of_year=2011 OR as_of_year=2012)
+- select: action_taken_name, applicant_ethnicity_name, applicant_income_000s, applicant_race_name_1, applicant_race_name_2, applicant_sex_name, as_of_year, census_tract_number, co_applicant_ethnicity_name, co_applicant_race_name_1, co_applicant_race_name_2, co_applicant_sex, county_name, loan_amount_000s, population, rate_spread, state_code
+- See https://cfpb.github.io/api/hmda/fields.html for the meaning of the variables. 
+- Copy paste the following link to the browser and it will start downloading the data (it takes a while to process the query and start downloading):
+`https://api.consumerfinance.gov/data/hmda/slice/hmda_lar.csv?&$where=as_of_year+IN+(2012,2011)+AND+action_taken+IN+(1,2,3)+AND+applicant_race_1+IN+(1,2,3,4,5)+AND+applicant_ethnicity+IN+(1,2)&$select=action_taken_name,%20applicant_ethnicity_name,%20applicant_income_000s,%20applicant_race_name_1,%20applicant_race_name_2,%20applicant_sex_name,%20as_of_year,%20census_tract_number,%20co_applicant_ethnicity_name,%20co_applicant_race_name_1,%20co_applicant_race_name_2,%20co_applicant_sex,%20county_name,%20loan_amount_000s,%20population,%20rate_spread,%20state_code&$limit=0`
+
+The dataset is around 3.5 G with name hmda_lar.csv. 
+
+## Geolocation proxy
+We use the census-tract level geolocation proxy (tract_over18_race_dec10.dta) that can be downloaded from https://github.com/cfpb/proxy-methodology 
+
+# Data cleaning 
+```{r cache = T}
+# read the raw data 
+library(tidyverse)
+library(foreign)
+library(totalcensus)
+source("data_cleaning_helper.R")
+hmda = read_csv("hmda_lar.csv")
+hmda = as.tibble(hmda)
+```
+
+```{r}
+# remove missing data 
+hmda <- hmda %>%
+  remove_obs(get_obs_state_missing) %>%  # remove observations whose state_code is missing
+  remove_obs(get_obs_tract_missing) %>%  # remove observations whose tract number is missing
+  remove_obs(get_obs_county_missing) %>%  # remove observations whose county is missing
+  transform_tract_number()  # remove the . in census tract number: "1111.11" --> "111111"
+
+
+```
+
+```{r}
+# Census Preprocesssing 
+tract_over18 = read.dta("tract_over18_race_dec10.dta")
+tract_over18 = select(tract_over18, -one_of(c("GEOID10_Tract", "Non_Hispanic_Total", "NH_Other_alone", "NH_Mult_Total", "NH_White_Other", "NH_Black_Other", "NH_AIAN_Other", "NH_Asian_HPI", "NH_API_Other", "NH_Asian_HPI_Other")))
+
+tract_over18 = mutate(tract_over18, base_pop = Hispanic_Total + NH_White_alone + NH_Black_alone + NH_AIAN_alone + NH_API_alone) 
+tract_over18 <- tract_over18 %>%
+  mutate(Hispanic = Hispanic_Total/base_pop,
+              White = NH_White_alone/base_pop,
+              Black = NH_Black_alone/base_pop,
+              AIAN = NH_AIAN_alone/base_pop,
+              API = NH_API_alone/base_pop) %>% 
+  select(-one_of(c("Hispanic_Total", "NH_White_alone", "NH_Black_alone", "NH_AIAN_alone", "NH_API_alone")))
+tract_over18 = as.tibble(tract_over18)
+tract_over18$State_FIPS10 = as.integer(tract_over18$State_FIPS10)
+# write_csv(tract_over18, "BIG.csv")
+```
+
+```{r}
+# combine the census tract proxy with the hmda dataset 
+# tract_over18 = read_csv("BIG.csv")
+
+# get the county code for the hmda dataset (originally use county names)
+fips = search_fips(view = F)
+fips_county <- fips %>% 
+  select(one_of(c("STATE", "COUNTY", "NAME")))
+fips_county$STATE = as.integer(fips_county$STATE)
+
+temp = hmda %>% 
+  left_join(fips_county, by = c("state_code"="STATE", "county_name"="NAME")) %>% 
+  filter(!is.na(COUNTY))
+
+# combine the census tract proxy and the hmda dataset 
+temp <- temp %>% 
+  left_join(tract_over18, by = c("state_code"="State_FIPS10", "COUNTY"="County_FIPS10", "census_tract_number"="Tract_FIPS10")) %>% 
+  filter(!is.na(White))
+
+temp = temp %>% select(applicant_ethnicity_name, applicant_race_name_1, applicant_race_name_2, applicant_income_000s, census_tract_number, COUNTY, state_code, 
+                Hispanic, White, Black, AIAN, API, outcome)
+
+# write_csv(temp, "hmda_census_combined.csv")
+```
+
+
+
+
